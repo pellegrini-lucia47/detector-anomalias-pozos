@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # CONFIGURACIÓN DE LA PÁGINA
 # ============================================================
 st.set_page_config(
-    page_title="Detector de Anomalías en Pozos Petroleros",
+    page_title="ECOPOZO — Monitoreo Inteligente de Pozos",
     page_icon="🛢️",
     layout="wide"
 )
@@ -18,6 +18,14 @@ SENSORES = ["P-ANULAR", "P-PDG", "P-TPT", "T-TPT", "P-JUS-CKGL", "P-MON-CKP",
             "T-JUS-CKP", "T-PDG", "P-JUS-BS", "P-MON-CKGL", "P-JUS-CKP", "PT-P", "QBS", "QGL"]
 
 UMBRAL_FISICO = 1e8  # descarta valores de sensor físicamente imposibles (errores de medición)
+
+# Umbrales del ECO SCORE, calibrados con datos reales de test (ver análisis en Colab)
+UMBRAL_VERDE = 30
+UMBRAL_AMARILLO = 65
+
+# Umbrales de riesgo ambiental (reglas simples, basadas en variación de sensores clave)
+UMBRAL_CAIDA_PRESION_ANULAR = -50   # slope muy negativo -> posible fuga
+UMBRAL_RANGO_PRESION_ALTO = 2000    # oscilación anómala de presión
 
 
 # ============================================================
@@ -81,40 +89,87 @@ def preparar_para_prediccion(feats_dict, columnas_features, imputer):
     """Arma un DataFrame de una fila con exactamente las columnas que espera el modelo."""
     fila = pd.DataFrame([feats_dict])
 
-    # Agregar columnas faltantes (que el modelo espera pero no se pudieron calcular) como NaN
     for col in columnas_features:
         if col not in fila.columns:
             fila[col] = np.nan
 
-    fila = fila[columnas_features]  # mismo orden que en el entrenamiento
+    fila = fila[columnas_features]
     fila = fila.replace([np.inf, -np.inf], np.nan)
 
     fila_imputada = pd.DataFrame(imputer.transform(fila), columns=columnas_features)
     return fila_imputada
 
 
+def calcular_eco_score(modelo, fila_imputada):
+    """Devuelve el ECO SCORE (0-100): probabilidad de anomalía según el modelo."""
+    probs = modelo.predict_proba(fila_imputada)[0]
+    idx_anomalia = list(modelo.classes_).index("ANOMALIA")
+    return probs[idx_anomalia] * 100
+
+
+def clasificar_semaforo(eco_score, umbral_verde=UMBRAL_VERDE, umbral_amarillo=UMBRAL_AMARILLO):
+    if eco_score < umbral_verde:
+        return "🟢 ESTABLE", "normal", "El pozo opera dentro de parámetros normales."
+    elif eco_score < umbral_amarillo:
+        return "🟡 ATENCIÓN", "off", "Se detectan variaciones que conviene monitorear de cerca."
+    else:
+        return "🔴 ANOMALÍA", "inverse", "Comportamiento anómalo detectado. Se recomienda revisión."
+
+
+def evaluar_riesgo_ambiental(feats):
+    """Reglas simples y explicables para señalar comportamientos que podrían
+    justificar una inspección ambiental (no reemplazan una inspección real)."""
+    alertas = []
+
+    slope_anular = feats.get("P-ANULAR_slope", 0)
+    if slope_anular is not None and not pd.isna(slope_anular) and slope_anular < UMBRAL_CAIDA_PRESION_ANULAR:
+        alertas.append("⚠️ Caída abrupta de presión anular — posible indicio de fuga en el sistema de contención.")
+
+    rango_pdg = feats.get("P-PDG_range", 0)
+    if rango_pdg is not None and not pd.isna(rango_pdg) and rango_pdg > UMBRAL_RANGO_PRESION_ALTO:
+        alertas.append("⚠️ Oscilación de presión de fondo (PDG) por fuera de lo esperado — revisar integridad del pozo.")
+
+    rango_tpt = feats.get("P-TPT_range", 0)
+    if rango_tpt is not None and not pd.isna(rango_tpt) and rango_tpt > UMBRAL_RANGO_PRESION_ALTO:
+        alertas.append("⚠️ Variación fuerte de presión en tubing (TPT) — posible inestabilidad de flujo con riesgo asociado.")
+
+    return alertas
+
+
 # ============================================================
 # INTERFAZ
 # ============================================================
-st.title("🛢️ Detector de Anomalías en Pozos Petroleros")
+st.title("🛢️🌱 ECOPOZO")
+st.subheader("Monitoreo inteligente para detectar anomalías operativas y prevenir riesgos ambientales")
+
 st.markdown(
-    "Subí un archivo con la serie temporal de sensores de un pozo (formato del dataset 3W) "
-    "y el modelo va a indicar si corresponde a **operación normal** o a una **anomalía "
-    "(inestabilidad de flujo)**."
+    "Detectar manualmente cuándo un pozo comienza a comportarse de forma anormal puede ser difícil. "
+    "ECOPOZO analiza automáticamente los datos del pozo y genera un diagnóstico simple y accionable, "
+    "junto con una señal preventiva sobre posibles riesgos ambientales."
 )
 
 with st.sidebar:
-    st.header("ℹ️ Sobre el modelo")
+    st.header("ℹ️ Sobre ECOPOZO")
     st.markdown("""
-    - Entrenado con datos **reales** del dataset 3W (Petrobras)
-    - Clasificación binaria: Normal vs Anomalía
-    - Prioriza **no dejar pasar anomalías reales** (alto recall), aunque
-      eso implique algunas falsas alarmas a revisar
+    **Objetivo del sistema:**
+    Ayudar a detectar tempranamente cambios anormales en el
+    comportamiento de un pozo — no perseguir un accuracy perfecto,
+    sino dar una alerta temprana y explicable.
+
+    **Semáforo operativo:**
+    - 🟢 **Estable** — operación normal
+    - 🟡 **Atención** — variaciones a monitorear
+    - 🔴 **Anomalía** — revisión recomendada
+
+    **Metodología:**
+    - Modelo entrenado con datos **reales** del dataset 3W (Petrobras)
+    - Umbrales del ECO SCORE calibrados con datos de test reales
     - Evaluado con pozos completamente distintos entre entrenamiento y prueba
+    - Componente ambiental basado en reglas explicables sobre sensores clave
     """)
 
 archivo = st.file_uploader(
-    "Subí el archivo de la instancia (.parquet o .csv)",
+    "Subí el archivo de la instancia a analizar (.parquet o .csv)",
     type=["parquet", "csv"]
 )
 
@@ -127,46 +182,64 @@ if archivo is not None:
 
         st.success(f"Archivo cargado: {df_serie.shape[0]} filas, {df_serie.shape[1]} columnas")
 
-        with st.spinner("Calculando features y prediciendo..."):
+        with st.spinner("Calculando ECO SCORE..."):
             modelo, imputer, columnas_features = cargar_modelo()
             feats = extraer_features(df_serie, SENSORES)
             fila_lista = preparar_para_prediccion(feats, columnas_features, imputer)
 
-            prediccion = modelo.predict(fila_lista)[0]
-            probabilidades = modelo.predict_proba(fila_lista)[0]
-            clases = modelo.classes_
-            prob_dict = dict(zip(clases, probabilidades))
+            eco_score = calcular_eco_score(modelo, fila_lista)
+            etiqueta, delta_color, explicacion = clasificar_semaforo(eco_score)
+            alertas_ambientales = evaluar_riesgo_ambiental(feats)
+
+        st.divider()
 
         # ============================================================
-        # RESULTADO
+        # RESULTADO PRINCIPAL
         # ============================================================
-        st.divider()
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            if prediccion == "ANOMALIA":
-                st.error("⚠️ ANOMALÍA DETECTADA")
-            else:
-                st.success("✅ OPERACIÓN NORMAL")
+            st.markdown(f"## {etiqueta}")
+            st.caption(explicacion)
+            st.metric("ECO SCORE", f"{eco_score:.1f} / 100")
+            st.progress(min(int(eco_score), 100) / 100)
 
-            st.metric("Confianza", f"{max(probabilidades)*100:.1f}%")
-            st.write("Probabilidades:")
-            for clase, prob in prob_dict.items():
-                st.write(f"- {clase}: {prob*100:.1f}%")
+            st.markdown("#### 🌱 Componente ambiental")
+            if alertas_ambientales:
+                for alerta in alertas_ambientales:
+                    st.warning(alerta)
+            else:
+                st.info("No se detectaron señales que ameriten inspección ambiental preventiva.")
 
         with col2:
             sensores_disponibles = [s for s in SENSORES if s in df_serie.columns]
             if sensores_disponibles:
                 sensor_elegido = st.selectbox("Sensor a visualizar", sensores_disponibles)
                 fig, ax = plt.subplots(figsize=(8, 3))
-                ax.plot(df_serie[sensor_elegido].values, linewidth=0.8)
+                ax.plot(df_serie[sensor_elegido].values, linewidth=0.8, color="#2E86AB")
                 ax.set_title(f"Serie temporal — {sensor_elegido}")
                 ax.set_xlabel("Muestra")
                 ax.set_ylabel(sensor_elegido)
                 st.pyplot(fig)
 
-        with st.expander("Ver features calculadas"):
+        with st.expander("Ver features calculadas (detalle técnico)"):
             st.dataframe(pd.DataFrame([feats]).T.rename(columns={0: "valor"}))
+
+        with st.expander("¿Cómo se calcula el ECO SCORE?"):
+            st.markdown(f"""
+            El ECO SCORE es la probabilidad (0 a 100) de que el comportamiento del pozo
+            corresponda a una anomalía, según un modelo de Random Forest entrenado con
+            instancias **reales** del dataset 3W (Petrobras).
+
+            - **🟢 Estable:** ECO SCORE < {UMBRAL_VERDE}
+            - **🟡 Atención:** {UMBRAL_VERDE} ≤ ECO SCORE < {UMBRAL_AMARILLO}
+            - **🔴 Anomalía:** ECO SCORE ≥ {UMBRAL_AMARILLO}
+
+            Estos umbrales fueron calibrados analizando cómo se distribuye el ECO SCORE
+            en instancias reales ya etiquetadas, priorizando que **ninguna anomalía real
+            quede clasificada como estable** (aunque eso implique algunas falsas alarmas
+            a revisar manualmente).
+            """)
 
     except Exception as e:
         st.error(f"Error al procesar el archivo: {e}")
@@ -175,4 +248,4 @@ if archivo is not None:
             "por ejemplo: P-TPT, T-TPT, P-PDG, etc.)"
         )
 else:
-    st.info("👆 Subí un archivo para empezar.")
+    st.info("👆 Subí un archivo para comenzar el análisis.")
